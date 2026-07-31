@@ -1,0 +1,189 @@
+import re
+import string
+import warnings
+ 
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+ 
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.metrics import (
+    accuracy_score,
+    classification_report,
+    confusion_matrix,
+)
+ 
+warnings.filterwarnings("ignore")
+ 
+import nltk
+for pkg in ["stopwords", "wordnet", "omw-1.4", "punkt"]:
+    try:
+        nltk.data.find(f"corpora/{pkg}")
+    except LookupError:
+        nltk.download(pkg, quiet=True)
+ 
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+ 
+STOPWORDS = set(stopwords.words("english"))
+LEMMATIZER = WordNetLemmatizer()
+ 
+
+CSV_PATH = "Womens Clothing E-Commerce Reviews.csv"  
+TEXT_COL = "Review Text"                              
+RATING_COL = "Rating"                                 
+ 
+
+def load_data(csv_path: str) -> pd.DataFrame:
+    df = pd.read_csv(csv_path)
+    df = df.dropna(subset=[TEXT_COL, RATING_COL]).reset_index(drop=True)
+    print(f"Loaded {len(df)} reviews.")
+    return df
+ 
+ 
+
+def rating_to_sentiment(rating: int) -> str:
+    if rating <= 2:
+        return "Negative"
+    elif rating == 3:
+        return "Neutral"
+    else:
+        return "Positive"
+ 
+ 
+
+def clean_text(text: str) -> str:
+    text = str(text).lower()
+    text = re.sub(r"http\S+|www\S+", "", text)          
+    text = re.sub(r"[^a-z\s]", "", text)                
+    text = text.translate(str.maketrans("", "", string.punctuation))
+    tokens = text.split()
+    tokens = [
+        LEMMATIZER.lemmatize(w) for w in tokens
+        if w not in STOPWORDS and len(w) > 2
+    ]
+    return " ".join(tokens)
+ 
+ 
+
+def train_models(df: pd.DataFrame):
+    X = df["clean_text"]
+    y = df["sentiment"]
+ 
+    vectorizer = TfidfVectorizer(max_features=8000, ngram_range=(1, 2))
+    X_vec = vectorizer.fit_transform(X)
+ 
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_vec, y, test_size=0.2, random_state=42, stratify=y
+    )
+ 
+    models = {
+        "Logistic Regression": LogisticRegression(max_iter=1000, class_weight="balanced"),
+        "Naive Bayes": MultinomialNB(),
+    }
+ 
+    results = {}
+    for name, model in models.items():
+        model.fit(X_train, y_train)
+        preds = model.predict(X_test)
+        acc = accuracy_score(y_test, preds)
+        results[name] = {
+            "model": model,
+            "accuracy": acc,
+            "preds": preds,
+            "y_test": y_test,
+        }
+        print(f"\n{'=' * 55}\n{name} — Accuracy: {acc:.4f}\n{'=' * 55}")
+        print(classification_report(y_test, preds))
+ 
+    return vectorizer, results
+ 
+ 
+def plot_class_distribution(df: pd.DataFrame):
+    plt.figure(figsize=(6, 4))
+    sns.countplot(x="sentiment", data=df, order=["Negative", "Neutral", "Positive"],
+                  palette={"Negative": "#e74c3c", "Neutral": "#f1c40f", "Positive": "#2ecc71"})
+    plt.title("Sentiment Class Distribution")
+    plt.xlabel("Sentiment")
+    plt.ylabel("Number of Reviews")
+    plt.tight_layout()
+    plt.savefig("sentiment_distribution.png", dpi=150)
+    plt.close()
+ 
+ 
+def plot_confusion_matrix(y_test, preds, model_name: str):
+    labels = ["Negative", "Neutral", "Positive"]
+    cm = confusion_matrix(y_test, preds, labels=labels)
+    plt.figure(figsize=(5, 4))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=labels, yticklabels=labels)
+    plt.title(f"Confusion Matrix — {model_name}")
+    plt.xlabel("Predicted")
+    plt.ylabel("Actual")
+    plt.tight_layout()
+    fname = f"confusion_matrix_{model_name.replace(' ', '_').lower()}.png"
+    plt.savefig(fname, dpi=150)
+    plt.close()
+ 
+ 
+def plot_wordclouds(df: pd.DataFrame):
+    from wordcloud import WordCloud
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    for ax, sentiment in zip(axes, ["Negative", "Neutral", "Positive"]):
+        text = " ".join(df.loc[df["sentiment"] == sentiment, "clean_text"])
+        wc = WordCloud(width=500, height=400, background_color="white").generate(text)
+        ax.imshow(wc, interpolation="bilinear")
+        ax.set_title(f"{sentiment} Reviews")
+        ax.axis("off")
+    plt.tight_layout()
+    plt.savefig("sentiment_wordclouds.png", dpi=150)
+    plt.close()
+ 
+ 
+
+def predict_sentiment(text: str, vectorizer, model) -> str:
+    cleaned = clean_text(text)
+    vec = vectorizer.transform([cleaned])
+    return model.predict(vec)[0]
+ 
+ 
+def main():
+    df = load_data(CSV_PATH)
+ 
+    df["sentiment"] = df[RATING_COL].apply(rating_to_sentiment)
+    df["clean_text"] = df[TEXT_COL].apply(clean_text)
+ 
+    plot_class_distribution(df)
+ 
+    vectorizer, results = train_models(df)
+ 
+    best_name = max(results, key=lambda n: results[n]["accuracy"])
+    best = results[best_name]
+    print(f"\nBest model: {best_name} (Accuracy: {best['accuracy']:.4f})")
+ 
+    plot_confusion_matrix(best["y_test"], best["preds"], best_name)
+ 
+    try:
+        plot_wordclouds(df)
+    except ImportError:
+        print("Install `wordcloud` package to generate word clouds: pip install wordcloud --break-system-packages")
+ 
+  
+    sample_reviews = [
+        "The delivery was late and the product arrived damaged, very disappointed.",
+        "Customer support was quick to respond and solved my issue immediately, great service!",
+        "The item is okay, nothing special but does the job.",
+    ]
+    print("\n" + "=" * 55)
+    print("Sample predictions on new text:")
+    print("=" * 55)
+    for review in sample_reviews:
+        sentiment = predict_sentiment(review, vectorizer, best["model"])
+        print(f"[{sentiment:>8}]  {review}")
+ 
+ 
+if __name__ == "__main__":
+    main()
