@@ -1,0 +1,137 @@
+import pandas as pd
+import numpy as np
+import re
+import torch
+import torch.nn as nn
+import matplotlib.pyplot as plt
+from collections import Counter
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from torch.utils.data import Dataset, DataLoader
+
+df = pd.read_csv("IMDB_Dataset_CLEANED.csv").dropna()
+df["sentiment"] = df["sentiment"].map({"negative": 0, "positive": 1})
+
+def clean(text):
+    text = text.lower()
+    return re.sub(r"[^a-zA-Z\s]", "", re.sub(r"<.*?>", "", text))
+
+df["review"] = df["review"].apply(clean)
+
+X_train, X_temp, y_train, y_temp = train_test_split(
+    df["review"], df["sentiment"], test_size=0.2, random_state=42,
+    stratify=df["sentiment"]
+)
+
+X_val, X_test, y_val, y_test = train_test_split(
+    X_temp, y_temp, test_size=0.5, random_state=42, stratify=y_temp
+)
+
+counter = Counter(word for review in X_train for word in review.split())
+vocab = {"<PAD>": 0, "<UNK>": 1}
+
+for word, _ in counter.most_common(4998):
+    vocab[word] = len(vocab)
+
+MAX_LENGTH = 100
+
+def encode(text):
+    seq = [vocab.get(word, 1) for word in text.split()[:MAX_LENGTH]]
+    return seq + [0] * (MAX_LENGTH - len(seq))
+
+X_train = np.array([encode(x) for x in X_train])
+X_val = np.array([encode(x) for x in X_val])
+X_test = np.array([encode(x) for x in X_test])
+
+class ReviewDataset(Dataset):
+    def __init__(self, X, y):
+        self.X = torch.tensor(X, dtype=torch.long)
+        self.y = torch.tensor(np.array(y), dtype=torch.float32)
+
+    def __len__(self):
+        return len(self.X)
+
+    def __getitem__(self, i):
+        return self.X[i], self.y[i]
+
+train_loader = DataLoader(ReviewDataset(X_train, y_train), batch_size=128, shuffle=True)
+val_loader = DataLoader(ReviewDataset(X_val, y_val), batch_size=128)
+test_loader = DataLoader(ReviewDataset(X_test, y_test), batch_size=128)
+
+class LSTMModel(nn.Module):
+    def __init__(self, vocab_size):
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, 64, padding_idx=0)
+        self.lstm = nn.LSTM(64, 64, batch_first=True)
+        self.fc = nn.Linear(64, 1)
+
+    def forward(self, x):
+        x = self.embedding(x)
+        _, (h, _) = self.lstm(x)
+        return self.fc(h[-1]).squeeze(1)
+
+model = LSTMModel(len(vocab))
+criterion = nn.BCEWithLogitsLoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+
+train_losses = []
+val_losses = []
+
+for epoch in range(3):
+    model.train()
+    train_loss = 0
+
+    for reviews, labels in train_loader:
+        optimizer.zero_grad()
+        loss = criterion(model(reviews), labels)
+        loss.backward()
+        optimizer.step()
+        train_loss += loss.item()
+
+    train_loss /= len(train_loader)
+    train_losses.append(train_loss)
+
+    model.eval()
+    val_loss = 0
+
+    with torch.no_grad():
+        for reviews, labels in val_loader:
+            val_loss += criterion(model(reviews), labels).item()
+
+    val_loss /= len(val_loader)
+    val_losses.append(val_loss)
+
+    print(
+        f"Epoch {epoch+1}/3 | "
+        f"Train Loss: {train_loss:.4f} | "
+        f"Validation Loss: {val_loss:.4f}"
+    )
+
+model.eval()
+predictions = []
+actual = []
+
+with torch.no_grad():
+    for reviews, labels in test_loader:
+        output = torch.sigmoid(model(reviews))
+        predictions.extend((output >= 0.5).int().numpy())
+        actual.extend(labels.numpy())
+
+print("\nModel Evaluation")
+print("Accuracy :", round(accuracy_score(actual, predictions), 4))
+print("Precision:", round(precision_score(actual, predictions), 4))
+print("Recall   :", round(recall_score(actual, predictions), 4))
+print("F1-Score :", round(f1_score(actual, predictions), 4))
+
+review = input("\nEnter a movie review: ")
+
+sequence = torch.tensor([encode(clean(review))], dtype=torch.long)
+
+with torch.no_grad():
+    probability = torch.sigmoid(model(sequence)).item()
+
+sentiment = "Positive" if probability >= 0.5 else "Negative"
+confidence = probability if probability >= 0.5 else 1 - probability
+
+print("Predicted Sentiment:", sentiment)
+print("Confidence:", round(confidence * 100, 2), "%")
